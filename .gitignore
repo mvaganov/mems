@@ -45,3 +45,11 @@ $RECYCLE.BIN/
 Network Trash Folder
 Temporary Items
 .apdisk
+
+# visual studio
+Debug
+x64
+.vs
+
+# mems temp files
+*.memtable
