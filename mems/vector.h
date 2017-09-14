@@ -19,14 +19,14 @@ public:
 		if (i >= size()) i = -1;
 		return i;
 	}
-	void remove(int index) { this->erase(this->begin() + index); }
+	void removeAt(int index) { this->erase(this->begin() + index); }
+	void insertAt(int index, T& element) { this->insert(begin() + index, element); }
 	ArrayList(initializer_list<T> l) : vector<T>(l) {}
 	void add(std::initializer_list<T> l) { this->insert(this->end(), l.begin(), l.end()); }
 	std::pair<const T*, std::size_t> c_arr() const {
 		return std::pair(&(*this)[0], this->size());// copy list-initialization in return statement
 											 // this is NOT a use of std::initializer_list
 	}
-
 	String toString() const {
 		String result = "["; result += join(", "); result += "]"; return result;
 	}

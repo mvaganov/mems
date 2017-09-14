@@ -26,7 +26,7 @@ struct Terminal {
 	bool removeCommand(String commandName) {
 		int i = commands.indexOf(CMD(commandName,"",NULL));
 		if (i < 0) { return false; }
-		commands.remove(i);
+		commands.removeAt(i);
 		return true;
 	}
 

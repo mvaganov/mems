@@ -28,8 +28,8 @@ struct MemPage {
 	}
 	float percentageOf(LPCVOID point) {
 		int64_t total = size(), progress = (int64_t)point - (int64_t)min;
-		if (progress < 0) return 0;
-		if (progress > total) return 1;
+		//if (progress < 0) return 0;
+		//if (progress > total) return 1;
 		return (float)progress / total;
 	}
 	MemPage(LPCVOID start, LPCVOID end) :min(start), max(end), searchHits(0) {}
@@ -291,10 +291,10 @@ MemPage::MemPage(HANDLE clientHandle, LPCVOID startingPoint):min(NULL),max(NULL)
 	}
 }
 
-ostream & operator<<(ostream& o, CustomMemPageListing & listing) {
-	o << listing.mempages.size() << endl;
-	for (int i = 0; i < listing.mempages.size(); ++i) {
-		o << std::hex << (uint64_t)listing.mempages[i]->min << std::dec << " " << listing.mempages[i]->name << endl;
+ostream & operator<<(ostream& o, ArrayList<MemPage*> & listing) {
+	o << listing.size() << endl;
+	for (int i = 0; i < listing.size(); ++i) {
+		o << std::hex << (uint64_t)listing[i]->min << std::dec << " " << listing[i]->name << endl;
 	}
 	return o;
 }

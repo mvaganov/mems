@@ -115,6 +115,34 @@ void __printAnimation() {
 	printf("\r%c ", __animation[++__aninmation_iterations%__animLen]);
 }
 
+struct CooperativeProcess {
+	function<void()> begin;
+	function<bool()> active;
+	function<void()> end;
+	static const int STATE_UNINIT = 0;
+	static const int STATE_STARTED = 1;
+	static const int STATE_FINISHING = 2;
+	static const int STATE_DONE = 3;
+	int state;
+	void setup(function<void()> begin, function<bool()> active, function<void()> end){
+		this->begin = begin;
+		this->active = active;
+		this->end = end;
+		this->state = STATE_UNINIT;
+	}
+	CooperativeProcess() { setup(NULL, NULL, NULL); }
+	bool run() {
+		switch (state) {
+		case STATE_UNINIT: if (begin != NULL) { begin(); } state++;  break;
+		case STATE_STARTED: if (!active()) { state++; } break;
+		case STATE_FINISHING: if (end != NULL) { end(); } state++; break;
+		}
+		return state != STATE_DONE;
+	}
+	void forceEnd() { if (state == STATE_STARTED || state == STATE_FINISHING) { end(); state = STATE_DONE; } }
+	void reset() { forceEnd(); this->state = STATE_UNINIT; }
+};
+
 struct Mems {
 	String WINDOW_NAME;
 	BYTE * ptr;
@@ -156,11 +184,37 @@ struct Mems {
 		}
 	}
 
+	CooperativeProcess searchingForMemoryPages;
+	CooperativeProcess findOperation;
+	ArrayList<CooperativeProcess*> processStack;
+
+	int __startState;
 	Mems() : WINDOW_NAME("Untitled - Notepad"),ptr(0), hwnd(0), clientHandle(0), sizeof_mainBuffer(0),
 		mainBuffer(0), bytesRead(0), running(false), pageIndex(0), page(0),
 		consoleWidth(0), consoleHeight(0), currentSearchResult(0) { 
 		addCommands();
 		EnablePriv(SE_DEBUG_NAME); // enable this program to be accessed by other programs
+
+		searchingForMemoryPages.setup(
+			[this]()->void { __startState = pages.count(); },
+			[this]()->bool { 
+				int pageCount = pages.count();
+				bool result = pages.continueGenerate(100);
+				if (pageCount != pages.count()) { userinput = 1; }
+				return result;
+			},
+			[this]()->void { if (__startState != pages.count()) { saveMemoryPageSearch(); }}
+		);
+		findOperation.setup(
+			[this]()->void { find_begin(); },
+			[this]()->bool {
+				int resultCount = (int)searchHits.size();
+				bool result = find_active(1024);
+				if (resultCount != searchHits.size()) { userinput = 1; }
+				return result;
+			},
+			[this]()->void { find_end();  }
+		);
 	}
 	void addCommands();
 
@@ -170,6 +224,7 @@ struct Mems {
 	int init(const char * windowName = NULL, DWORD pId = 0) {
 		// clean things up before populating them again
 		pages.clear();
+		find_memPageSearchOrder.clear();
 		running = true;
 		pageIndex = 0;
 		page = NULL;
@@ -230,6 +285,7 @@ struct Mems {
 			saveMemoryPageSearch();
 			printf("found a page!");
 		}
+		processStack.Add(&searchingForMemoryPages);
 
 		memset(mainBuffer, 0, sizeof_mainBuffer);
 		running = true;
@@ -279,6 +335,11 @@ struct Mems {
 				uint64_t whereThisIsPointing = *((uint64_t*)(mainBuffer + i));
 				if (ReadProcessMemory(clientHandle, (LPCVOID)whereThisIsPointing, &tmpBuffer, sizeof(tmpBuffer), &bytesRead)) {
 					bgcolor = PLATFORM_COLOR_INTENSITY | PLATFORM_COLOR_RED;
+				} else {
+					whereThisIsPointing &= 0xffffffff; // mask 64 bit pointer to a 32 bit pointer, and check that too
+					if (ReadProcessMemory(clientHandle, (LPCVOID)whereThisIsPointing, &tmpBuffer, sizeof(tmpBuffer), &bytesRead)) {
+						bgcolor = PLATFORM_COLOR_INTENSITY | PLATFORM_COLOR_RED | PLATFORM_COLOR_GREEN;
+					}
 				}
 			}
 			printc((unsigned int)mainBuffer[i], bgcolor);
@@ -294,9 +355,9 @@ struct Mems {
 			platform_setColor(0, 15);
 			printf("pgdn"); printc(-1); putchar(' ');
 		}
-		printf("@0x%016llx, %12lld", (uint64_t)ptr, (int64_t)ptr);
+		printf("@0x%016llx, %20lld", (uint64_t)ptr, (int64_t)ptr);
 		if (page != NULL) {
-			printf("%8.2f%% into page %d", (page->percentageOf((LPCVOID)ptr) * 100), pageIndex);
+			printf("%8.2f%% in pg%d", (page->percentageOf((LPCVOID)ptr) * 100), pageIndex);
 		}putchar('\n');
 		if (page != NULL) {
 			printf("page "); printc('<', 15, 0); printc(-1); printf(" %3d", pageIndex);
@@ -314,6 +375,12 @@ struct Mems {
 			printf("result "); printc('F', 15, 0); printc(-1); printf(" %3d", currentSearchResult);
 			printf("/%3d ", (int)searchHits.size()); printc('f', 15, 0); printc(-1);
 			printf(" [0x%016llx, page %d] ", (uint64_t)searchHits[currentSearchResult].addr, pageIndex);
+			if (find_pageIndex >= 0 && find_pageIndex < find_memPageSearchOrder.size()) {
+				printf("searching %3d/%3d, (%5.1f%%)", find_pageIndex, (int)find_memPageSearchOrder.size(),
+					(float)find_chunkStart * 100 / find_memPageSearchOrder[find_pageIndex]->size());
+			} else {
+				printf("                             ");
+			}
 		} else {
 			for (int i = 0; i < consoleWidth - 1; ++i)putchar(' ');
 			putchar('\r');
@@ -324,7 +391,7 @@ struct Mems {
 			platform_setColor(0, 15);
 			printf("enter"); printc(-1); putchar(' ');
 		}
-		printf("\n   (%010.7f%% total memory searched, %d/%d scavenged)", pages.percentageProgress, pages.checked, pages.count());
+		printf("\n   (%010.7f%% total memory scanned, %3d/%3d scavenged)", pages.percentageProgress*100, pages.checked, pages.count());
 	}
 	void input() {
 		userinput = 0;
@@ -336,73 +403,70 @@ struct Mems {
 				userinput = platform_getch();
 			} else {
 				time_t soon = clock() + 50;
-				int pageCount = pages.count();
-				do { pages.continueGenerate(100); } while (!platform_kbhit() && clock() < soon);
-				if (pageCount != pages.count()) { saveMemoryPageSearch(); }
+				CooperativeProcess * cproc = (processStack.size() > 0) ? processStack[processStack.size() - 1] : NULL;
+				bool keepRunning;
+				do { keepRunning = (cproc == NULL) || cproc->run(); } while (keepRunning && !platform_kbhit() && clock() < soon);
+				if (!keepRunning) { processStack.removeAt((int)processStack.size() - 1); }
 				__printAnimation();
 			}
-		} while (userinput == 0 && pageCountWhenStartedDraw == pages.count());
+		} while (userinput == 0);
 	}
+	void jumpMemory(BYTE* nextPosition, int nextPageIndex = -1) {
+		if (nextPageIndex == -1) {
+			nextPageIndex = pages.pageIndexOf((LPCVOID)nextPosition);
+			if (nextPageIndex == -1) { pages.add((LPCVOID)ptr); nextPageIndex = pages.count() - 1; }
+		}
+		pageIndex = nextPageIndex;
+		page = pages.get(pageIndex);
+		history.push_back(ptr);
+		if (nextPosition == NULL) {
+			nextPosition = (BYTE*)page->min;
+		}
+		ptr = (BYTE*)nextPosition;
+	}
+
 	void update() {
 		switch (userinput) {
 		case 'w':	ptr -= consoleWidth;	break;
 		case 'a':	ptr -= 1;	break;
 		case 's':	ptr += consoleWidth;	break;
 		case 'd':	ptr += 1;	break;
+		case 'W':	ptr -= consoleWidth*consoleHeight;	break;
+		case 'A':	ptr -= sizeof(void*);	break;
+		case 'S':	ptr += consoleWidth*consoleHeight;	break;
+		case 'D':	ptr += sizeof(void*);	break;
 		case 18912: ptr -= consoleWidth*consoleHeight; break;//pageup
 		case 20960: ptr += consoleWidth*consoleHeight; break;//pagedown
 		case '>': case '.':
 			if (pages.count() > 0) {
-				pageIndex++;
-				if (pageIndex >= pages.count())pageIndex = 0;
-				page = pages.get(pageIndex);
-				history.push_back(ptr);
-				ptr = (BYTE*)page->min;
+				pageIndex++; while(pageIndex >= pages.count()) { pageIndex -= pages.count(); }
+				jumpMemory(0, pageIndex);
 			}
 			break;
 		case '<': case ',':
 			if (pages.count() > 0) {
-				pageIndex--;
-				if (pageIndex < 0)pageIndex = pages.count() - 1;
-				page = pages.get(pageIndex);
-				history.push_back(ptr);
-				ptr = (BYTE*)page->min;
+				pageIndex--; while (pageIndex < 0) { pageIndex += pages.count(); }
+				jumpMemory(0, pageIndex);
 			}
 			break;
 		case 'f': //next
 			if (searchHits.size() > 0) {
-				// TODO make a "jumpMemory" function, which adjusts the page stuff.
-				currentSearchResult++;
-				while (currentSearchResult >= searchHits.size()) { currentSearchResult -= (int)searchHits.size(); }
-				SearchHit sh = searchHits[currentSearchResult];
-				pageIndex = sh.page;
-				page = pages.get(pageIndex);
-				history.push_back(ptr);
-				ptr = (BYTE*)sh.addr;
+				currentSearchResult++; while (currentSearchResult >= searchHits.size()) { currentSearchResult -= (int)searchHits.size(); }
+				SearchHit sh = searchHits[currentSearchResult]; jumpMemory((BYTE*)sh.addr, sh.page);
 			}
 			break;
 		case 'F': //previous
 			if (searchHits.size() > 0) {
-				currentSearchResult--;
-				while (currentSearchResult < 0) { currentSearchResult += (int)searchHits.size(); }
-				SearchHit sh = searchHits[currentSearchResult];
-				pageIndex = sh.page;
-				page = pages.get(pageIndex);
-				history.push_back(ptr);
-				ptr = (BYTE*)sh.addr;
+				currentSearchResult--; while (currentSearchResult < 0) { currentSearchResult += (int)searchHits.size(); }
+				SearchHit sh = searchHits[currentSearchResult]; jumpMemory((BYTE*)sh.addr, sh.page);
 			}
 			break;
 		case ' ':
-			if(page != NULL){
-				// this stack removes ambiguity about scope of whereThisIsPointing
+			if(page != NULL) {
 				uint64_t whereThisIsPointing = *((uint64_t*)(mainBuffer));
 				uint64_t tmpBuffer;
 				if (ReadProcessMemory(clientHandle, (LPCVOID)whereThisIsPointing, &tmpBuffer, sizeof(tmpBuffer), &bytesRead)) {
-					history.push_back(ptr);
-					ptr = (BYTE*)whereThisIsPointing;
-					pageIndex = pages.pageIndexOf((LPCVOID)ptr);
-					if (pageIndex == -1) { pages.add((LPCVOID)ptr); pageIndex = pages.count() - 1; }
-					page = pages.get(pageIndex);
+					jumpMemory((BYTE*)whereThisIsPointing);
 				}
 			}
 			break;
@@ -411,7 +475,7 @@ struct Mems {
 				ptr = history[history.size() - 1];
 				history.pop_back();
 				pageIndex = pages.pageIndexOf((LPCVOID)ptr);
-				if (pageIndex == -1) { pages.add((LPCVOID)ptr); pageIndex = pages.count() - 1; }
+				if (pageIndex == -1) { pages.add((LPCVOID)ptr); pageIndex = pages.count() - 1; } // remove this?
 				page = pages.get(pageIndex);
 			}
 			break;
@@ -442,7 +506,7 @@ struct Mems {
 
 	bool take(ArrayList<String> & args, String s) {
 		int i = args.indexOf(s);
-		if (i == 1) { args.remove(i); return true; }
+		if (i == 1) { args.removeAt(i); return true; }
 		return false;
 	}
 
@@ -504,74 +568,112 @@ struct Mems {
 			memcpy(searchBuffer, &value, searchBufferUsed);
 			break;
 		}
-		this->find();
+		int idx = processStack.indexOf(&findOperation);
+		if (idx >= 0) {
+			processStack[idx]->reset();
+		} else {
+			processStack.Add(&findOperation);
+		}
 	}
 
 	// TODO make this an asynchronous process...
 	int find_pageIndex;
-	const int find_chunkSize = 4096;
-	BYTE* find_chunkStart;
-	//void findStart() {
-	//	printf("looking for: "); for (int i = 0; i < searchBufferUsed; ++i) { printf("%02x", searchBuffer[i]); } printf("\n");
-	//	searchHits.clear();
-	//	find_pageIndex = 0;
-	//	find_chunkStart = 0;
-	//}
-	//bool findContinue() {
-	//	find_chunkStart += find_chunkSize;
-	//	LPCVOID start = NULL, found;
-	//	do {
-	//		// TODO 
-	//		found = pages.get(find_pageIndex)->indexOf(clientHandle, searchBuffer, searchBufferUsed, start, );
-	//		if (found != NULL) {
-	//			searchHits.Add(Mems::SearchHit(found, find_pageIndex));
-	//			start = (LPCVOID)((BYTE*)found + 1);
-	//		}
-	//	} while (found != NULL);
-	//	if (searchHits.length() > 0) {
-	//		bool thisPageWasHit = false;
-	//		for (int h = 0; h < searchHits.length(); h++) {
-	//			if (searchHits[h].page == page) { thisPageWasHit = true; break; }
-	//		}
-	//		if (thisPageWasHit) {
-	//			// TODO when a page has positive search results, mark that memory page as more intersting, and move it closer to the front of the list.
-	//		}
-	//	}
-	//	return true;
-	//}
-
-	void find() {
-		printf("looking for: "); for (int i = 0; i < searchBufferUsed; ++i) { printf("%02x", searchBuffer[i]); } printf("\n");
+	uint64_t find_chunkStart;
+	ArrayList<MemPage*> find_memPageSearchOrder;
+	void find_begin() {
+		//printf("looking for: "); for (int i = 0; i < searchBufferUsed; ++i) { printf("%02x", searchBuffer[i]); } printf("\n");
 		searchHits.clear();
-		for (int page = 0; page < pages.count(); ++page) {
-			printf("."); // TODO remove search output
-			LPCVOID start = NULL, found;
-			do {
-				found = pages.get(page)->indexOf(clientHandle, searchBuffer, searchBufferUsed, start);
-				if (found != NULL) {
-					searchHits.Add(Mems::SearchHit(found, page));
-					start = (LPCVOID)((BYTE*)found + 1);
-				}
-			} while (found != NULL);
-			if (searchHits.length() > 0) {
-				bool thisPageWasHit = false;
-				for (int h = 0; h < searchHits.length(); h++) {
-					if (searchHits[h].page == page) { thisPageWasHit = true; break; }
-				}
-				if (thisPageWasHit) {
-					// TODO when a page has positive search results, mark that memory page as more intersting, and move it closer to the front of the list.
+		find_pageIndex = 0;
+		find_chunkStart = 0;
+		for (int i = 0; i < pages.count(); ++i) {
+			pages.mempages[i]->searchHits = 0;
+		}
+	}
+	void keepSearchOrderListCurrent() {
+		if (find_memPageSearchOrder.size() != pages.count()) {
+			for (int i = 0; i < pages.count(); ++i) {
+				if (find_memPageSearchOrder.indexOf(pages.mempages[i]) < 0) {
+					find_memPageSearchOrder.add(pages.mempages[i]);
 				}
 			}
+			//cout << "search list is " << find_memPageSearchOrder.size() << endl;
 		}
-		// TODO if memory page interst has changed sufficiently to require a re-shuffling, do the reshuffle!
-			// Adjust searchHits and current page as needed
+	}
+	bool find_active(int find_chunkSize) {
+		//cout << ".";
+		keepSearchOrderListCurrent();
+		if (find_pageIndex >= find_memPageSearchOrder.size()) {
+			//cout << "no more to search... " << find_memPageSearchOrder.size() << endl;
+			return false;
+		}
+		MemPage * thePage = find_memPageSearchOrder.get(find_pageIndex);
+		BYTE* start, *end, *found;
+		bool nextPage;
+		uint64_t chunkSize = find_chunkSize;
+		do {
+			nextPage = false;
+			start = ((BYTE*)thePage->min + find_chunkStart);
+			end = ((BYTE*)thePage->min + find_chunkStart + find_chunkSize + searchBufferUsed);
+			//cout << find_chunkStart << " " << find_chunkSize << " " << searchBufferUsed << endl;
+			//cout << (uint64_t)start << " --> " << (uint64_t)end << endl;
+			if ((uint64_t)end > (uint64_t)thePage->max) { end = (BYTE*)thePage->max; }
+			//cout << (uint64_t)start << "  -  " << (uint64_t)end << endl;
+			if (end - start < searchBufferUsed) {
+				//int searchSpaceLeft = end - start;
+				find_pageIndex++;
+				find_chunkStart = 0;
+				//cout << searchSpaceLeft << " search left ("<< searchBufferUsed <<") moving to page " << find_pageIndex << endl;
+				nextPage = true;
+				if (find_pageIndex >= find_memPageSearchOrder.size()) {
+					//cout << "finished!" << endl;
+					return false;
+				}
+				thePage = find_memPageSearchOrder.get(find_pageIndex);
+			}
+		} while (nextPage);
+		do {
+			found = (BYTE*)thePage->indexOf(clientHandle, searchBuffer, searchBufferUsed, (LPCVOID)start, (LPCVOID)end);
+			if (found != NULL) {
+				searchHits.Add(Mems::SearchHit((LPCVOID)found, find_pageIndex));
+				start = (found + 1);
+				thePage->searchHits++;
+				//cout << "found on page " << find_pageIndex << endl;
+			}
+		} while (found != NULL);
+		find_chunkStart += find_chunkSize;
+		return true;
+	}
+	void find_end() {
+		bool changed = false;
+		for (int cursor = 0; cursor < find_memPageSearchOrder.size(); ++cursor) {
+			int mostSearched = cursor;
+			for (int i = cursor+1; i < find_memPageSearchOrder.size(); ++i) {
+				if (find_memPageSearchOrder[i]->searchHits > find_memPageSearchOrder[cursor]->searchHits) {
+					mostSearched = i;
+				}
+			}
+			if (mostSearched != cursor) {
+				MemPage * winner = find_memPageSearchOrder[mostSearched];
+				find_memPageSearchOrder.removeAt(mostSearched);
+				find_memPageSearchOrder.insertAt(cursor, winner);
+				changed = true;
+			}
+		}
+		if (changed) {
+			saveMemoryPageSearch();
+		}
 		if (searchHits.length() == 0) { cout << "not found." << endl; } // TODO remove output
 	}
+
 	void saveMemoryPageSearch() {
 		String filename = saveFileName();
 		ofstream myfile;
 		myfile.open(filename.c_str());
-		myfile << pages;
+		if (find_memPageSearchOrder.size() == pages.mempages.size()) {
+			myfile << find_memPageSearchOrder;
+		} else {
+			myfile << pages.mempages;
+		}
 		myfile.close();
 	}
 	bool selectSource() {
@@ -579,17 +681,6 @@ struct Mems {
 		EnumWindows(EnumWindowsProc, NULL);
 		platform_sleep(500);
 		map<String, ArrayList<int>>::iterator it = __windowsProcTable.begin();
-		//for (it = __windowsProcTable.begin(); it != __windowsProcTable.end(); it++) {
-		//	platform_setColor(15, 0);
-		//	cout << it->first;
-		//	platform_setColor(8, 0);
-		//	for (int i = 0; i < it->second.size(); ++i) {
-		//		if (i > 0) { cout << ","; }
-		//		cout << it->second.at(i);
-		//	}
-		//	cout << " ";
-		//}
-		//platform_setColor(7, 0);
 		printc('w', 15, 0); printc(-1); putchar(' ');
 		printc('a', 15, 0); printc(-1); putchar(' ');
 		printf("prev   ");
@@ -620,9 +711,9 @@ struct Mems {
 				printf("\rchoice: ");
 				userInput = platform_getch();
 				switch (userInput) {
-				case 'a':
+				case 'w': case 'a':
 					if (it == __windowsProcTable.begin()) { it = __windowsProcTable.end(); } it--; break;
-				case 'd':
+				case 's': case 'd':
 					it++; if (it == __windowsProcTable.end()) { it = __windowsProcTable.begin(); } break;
 				case '\n': case '\r': selected = it->first; hasTitle = true; break;
 				}
