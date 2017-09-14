@@ -8,8 +8,7 @@ using namespace std;
 
 int main(int argc, char ** argv) {
 	Mems mems;
-	// TODO make it work with no arguments, getting the user to search for the window/process
-	mems.forceValidInit();// "Untitled - Notepad");
+	mems.forceValidInit();
 	while (mems.running) {
 		mems.draw();
 		mems.input();

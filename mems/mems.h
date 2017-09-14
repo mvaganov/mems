@@ -576,7 +576,6 @@ struct Mems {
 		}
 	}
 
-	// TODO make this an asynchronous process...
 	int find_pageIndex;
 	uint64_t find_chunkStart;
 	ArrayList<MemPage*> find_memPageSearchOrder;
@@ -662,7 +661,6 @@ struct Mems {
 		if (changed) {
 			saveMemoryPageSearch();
 		}
-		if (searchHits.length() == 0) { cout << "not found." << endl; } // TODO remove output
 	}
 
 	void saveMemoryPageSearch() {
@@ -791,7 +789,7 @@ void Mems::addCommands() {
 		platform_clearScreen();
 		return 0;
 	}));
-	terminal.add(Terminal::CMD("save", "summary: forces current state of searched memory pages to be saved to a file local to the program.", [this](ArrayList<String> & args)->int {
+	terminal.add(Terminal::CMD("save", "summary: forces current state of searched memory pages to be saved to a cache-file in the local directory.", [this](ArrayList<String> & args)->int {
 		saveMemoryPageSearch();
 		return 0;
 	}));
@@ -799,7 +797,10 @@ void Mems::addCommands() {
 		platform_clearScreen();
 		return 0;
 	}));
+	// TODO =|set|assign
 	// TODO ^|xor
 	// TODO &|and
 	// TODO ||or
+	// TODO <<|leftshift
+	// TODO >>|rightshift
 }

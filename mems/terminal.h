@@ -11,7 +11,6 @@ struct Terminal {
 		function<int(ArrayList<String> & args)> func;
 		CMD(String command, String helptext, function<int(ArrayList<String>)> f) : command(command), helptext(helptext), func(f) {}
 		bool operator==(CMD const & other) { return command == other.command; }
-		// TODO put code to parse arguments string into arg list in this class
 	};
 	ArrayList<CMD> commands;
 
