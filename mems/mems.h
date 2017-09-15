@@ -163,12 +163,14 @@ struct Mems {
 	struct SearchHit {
 		LPCVOID addr;
 		int page;
-		SearchHit(LPCVOID addr, int page) :addr(addr), page(page) {}
+		String metadata;
+		SearchHit(LPCVOID addr, int page, String metadata) :addr(addr), page(page),metadata(metadata) {}
 	};
 
 	char searchBuffer[1024];
 	int searchBufferUsed;
 	int currentSearchResult;
+	int searchRange;
 	ArrayList<SearchHit> searchHits;
 
 	void updateBasedOnConsoleSize() {
@@ -374,9 +376,13 @@ struct Mems {
 		if (searchHits.size()) {
 			printf("result "); printc('F', 15, 0); printc(-1); printf(" %3d", currentSearchResult);
 			printf("/%3d ", (int)searchHits.size()); printc('f', 15, 0); printc(-1);
-			printf(" [0x%016llx, page %d] ", (uint64_t)searchHits[currentSearchResult].addr, pageIndex);
+			if (searchHits.size() > currentSearchResult) {
+				printf(" [0x%016llx pg%3d%.8s] ", (uint64_t)searchHits[currentSearchResult].addr, pageIndex, searchHits[currentSearchResult].metadata.c_str());
+			} else {
+				printf(" [search result ptr , page ???] ");
+			}
 			if (find_pageIndex >= 0 && find_pageIndex < find_memPageSearchOrder.size()) {
-				printf("searching %3d/%3d, (%5.1f%%)", find_pageIndex, (int)find_memPageSearchOrder.size(),
+				printf("searching%3d/%3d (%5.1f%%)", find_pageIndex, (int)find_memPageSearchOrder.size(),
 					(float)find_chunkStart * 100 / find_memPageSearchOrder[find_pageIndex]->size());
 			} else {
 				printf("                             ");
@@ -512,61 +518,61 @@ struct Mems {
 
 	void find(ArrayList<String> & args) {
 		int searchType = SEARCH_BYTES;
-		if (take(args,"wchar") || take(args, "w")) { searchType = SEARCH_WCHAR; }
-		else if (take(args, "chars")) { searchType = SEARCH_BYTES; }
-		else if (take(args, "binary") || take(args, "bin")) { searchType = SEARCH_BINARY; }
-		else if (take(args, "hex") || take(args, "h")) { searchType = SEARCH_HEX; }
-		else if (take(args, "int8")) { searchType = SEARCH_INT8; }
-		else if (take(args, "int16")) { searchType = SEARCH_INT16; }
-		else if (take(args, "int32")) { searchType = SEARCH_INT32; }
-		else if (take(args, "int64")) { searchType = SEARCH_INT64; }
-		int valueIndex = 1;
-		if (args.length() > valueIndex) {
-			String s = args[valueIndex];
-			searchBufferUsed = (int)s.length();
-			memcpy(searchBuffer, s.c_str(), searchBufferUsed);
-			searchBuffer[searchBufferUsed] = '\0';
+		searchRange = 0; // exact match plz
+		if (args[1] == "ptr") {
+			if (args.length() > 2) { searchRange = atoi(args[2].c_str()); } // accept matches that are this close
+			memcpy(searchBuffer, &ptr, sizeof(ptr));
+			searchBufferUsed = sizeof(ptr);
 		} else {
-			putchar('\n');
-			for (int i = 0; i < this->consoleWidth-1; ++i) { putchar(' '); }
-			putchar('\r');
-			cout << "search term: ";
-			cin.getline(searchBuffer, sizeof(searchBuffer));
-			searchBufferUsed = (int)strlen(searchBuffer);
-		}
-		uint64_t value;
-		switch (searchType) {
-		case Mems::SEARCH_WCHAR:
-			inPlaceWideCharConvert(searchBuffer, searchBufferUsed);
-			searchBufferUsed *= 2;
-			break;
-		case Mems::SEARCH_HEX:
-		case Mems::SEARCH_BINARY:
+			if (take(args, "wchar") || take(args, "w")) { searchType = SEARCH_WCHAR; } else if (take(args, "chars")) { searchType = SEARCH_BYTES; } else if (take(args, "binary") || take(args, "bin")) { searchType = SEARCH_BINARY; } else if (take(args, "hex") || take(args, "h")) { searchType = SEARCH_HEX; } else if (take(args, "int8")) { searchType = SEARCH_INT8; } else if (take(args, "int16")) { searchType = SEARCH_INT16; } else if (take(args, "int32")) { searchType = SEARCH_INT32; } else if (take(args, "int64")) { searchType = SEARCH_INT64; }
+			int valueIndex = 1;
+			if (args.length() > valueIndex) {
+				String s = args[valueIndex];
+				searchBufferUsed = (int)s.length();
+				memcpy(searchBuffer, s.c_str(), searchBufferUsed);
+				searchBuffer[searchBufferUsed] = '\0';
+			} else {
+				putchar('\n');
+				for (int i = 0; i < this->consoleWidth - 1; ++i) { putchar(' '); }
+				putchar('\r');
+				cout << "search term: ";
+				cin.getline(searchBuffer, sizeof(searchBuffer));
+				searchBufferUsed = (int)strlen(searchBuffer);
+			}
+			uint64_t value;
 			switch (searchType) {
+			case Mems::SEARCH_WCHAR:
+				inPlaceWideCharConvert(searchBuffer, searchBufferUsed);
+				searchBufferUsed *= 2;
+				break;
 			case Mems::SEARCH_HEX:
-				value = strtoul(searchBuffer, NULL, 16); break;
-				if(searchBufferUsed % 2 != 0) searchBufferUsed = (searchBufferUsed / 2) + 1;
-				else                          searchBufferUsed = searchBufferUsed / 2;
 			case Mems::SEARCH_BINARY:
-				value = strtoul(searchBuffer, NULL, 2); break;
-				if (searchBufferUsed % 8 != 0) searchBufferUsed = (searchBufferUsed / 8) + 1;
-				else                           searchBufferUsed = searchBufferUsed / 8;
+				switch (searchType) {
+				case Mems::SEARCH_HEX:
+					value = strtoul(searchBuffer, NULL, 16); break;
+					if (searchBufferUsed % 2 != 0) searchBufferUsed = (searchBufferUsed / 2) + 1;
+					else                          searchBufferUsed = searchBufferUsed / 2;
+				case Mems::SEARCH_BINARY:
+					value = strtoul(searchBuffer, NULL, 2); break;
+					if (searchBufferUsed % 8 != 0) searchBufferUsed = (searchBufferUsed / 8) + 1;
+					else                           searchBufferUsed = searchBufferUsed / 8;
+				}
+				memcpy(searchBuffer, &value, searchBufferUsed);
+				break;
+			case Mems::SEARCH_INT8:
+			case Mems::SEARCH_INT16:
+			case Mems::SEARCH_INT32:
+			case Mems::SEARCH_INT64:
+				value = atoll(searchBuffer);
+				switch (searchType) {
+				case Mems::SEARCH_INT8: searchBufferUsed = 1; break;
+				case Mems::SEARCH_INT16: searchBufferUsed = 2; break;
+				case Mems::SEARCH_INT32: searchBufferUsed = 4; break;
+				case Mems::SEARCH_INT64: searchBufferUsed = 8; break;
+				}
+				memcpy(searchBuffer, &value, searchBufferUsed);
+				break;
 			}
-			memcpy(searchBuffer, &value, searchBufferUsed);
-			break;
-		case Mems::SEARCH_INT8:
-		case Mems::SEARCH_INT16:
-		case Mems::SEARCH_INT32:
-		case Mems::SEARCH_INT64:
-			value = atoll(searchBuffer);
-			switch (searchType) {
-			case Mems::SEARCH_INT8: searchBufferUsed = 1; break;
-			case Mems::SEARCH_INT16: searchBufferUsed = 2; break;
-			case Mems::SEARCH_INT32: searchBufferUsed = 4; break;
-			case Mems::SEARCH_INT64: searchBufferUsed = 8; break;
-			}
-			memcpy(searchBuffer, &value, searchBufferUsed);
-			break;
 		}
 		int idx = processStack.indexOf(&findOperation);
 		if (idx >= 0) {
@@ -582,6 +588,7 @@ struct Mems {
 	void find_begin() {
 		//printf("looking for: "); for (int i = 0; i < searchBufferUsed; ++i) { printf("%02x", searchBuffer[i]); } printf("\n");
 		searchHits.clear();
+		currentSearchResult = 0;
 		find_pageIndex = 0;
 		find_chunkStart = 0;
 		for (int i = 0; i < pages.count(); ++i) {
@@ -630,10 +637,11 @@ struct Mems {
 				thePage = find_memPageSearchOrder.get(find_pageIndex);
 			}
 		} while (nextPage);
+		String metadata;
 		do {
-			found = (BYTE*)thePage->indexOf(clientHandle, searchBuffer, searchBufferUsed, (LPCVOID)start, (LPCVOID)end);
+			found = (BYTE*)thePage->indexOf(clientHandle, metadata, searchBuffer, searchBufferUsed, (LPCVOID)start, (LPCVOID)end, searchRange);
 			if (found != NULL) {
-				searchHits.Add(Mems::SearchHit((LPCVOID)found, find_pageIndex));
+				searchHits.Add(Mems::SearchHit((LPCVOID)found, find_pageIndex, metadata));
 				start = (found + 1);
 				thePage->searchHits++;
 				//cout << "found on page " << find_pageIndex << endl;
@@ -741,7 +749,7 @@ void Mems::addCommands() {
 		running = false;
 		return 0;
 	}));
-	terminal.add(Terminal::CMD("find", "usage: find [chars|wchars|int8|int16|int32|int64|hex|binary] <value>\n"
+	terminal.add(Terminal::CMD("find", "usage: find [chars|wchars|int8|int16|int32|int64|hex|binary] <value>\nusage: ptr [distance from value]\n"
 		"summary: searches known memory pages for the specified value.\nexample: find wchars \"Hello World!\"\nexample: find hex baadf00d", 
 		[this](ArrayList<String> & args)->int {
 		find(args);

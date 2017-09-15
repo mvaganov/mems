@@ -35,7 +35,8 @@ struct MemPage {
 	MemPage(LPCVOID start, LPCVOID end) :min(start), max(end), searchHits(0) {}
 	MemPage(MemPage & copy) :min(copy.min), max(copy.max), searchHits(copy.searchHits) { }
 
-	LPCVOID indexOf(HANDLE clientHandle, const char * memory, SIZE_T size, LPCVOID startSearch = NULL, LPCVOID endSearch = NULL) {
+	// rename to something like 'memsearch'
+	LPCVOID indexOf(HANDLE clientHandle, String & metaData, const char * memory, SIZE_T size, LPCVOID startSearch = NULL, LPCVOID endSearch = NULL, int acceptableError = 0) {
 		static BYTE*buffer = NULL;
 		static SIZE_T allocatedSize = 0;
 		if (startSearch == NULL) startSearch = min;
@@ -47,10 +48,39 @@ struct MemPage {
 			buffer = new BYTE[size];
 			allocatedSize = size;
 		}
+		int acceptableErrorBytes = 0, requiredMatchingBytes = (int)size;
+		if (acceptableError != 0) {
+			acceptableErrorBytes = 0;
+			int test = acceptableError;
+			while (test != 0) {
+				test = test >> 8;
+				acceptableErrorBytes++;
+			}
+			requiredMatchingBytes = (int)size - acceptableErrorBytes;
+			if (requiredMatchingBytes <= 0) { return NULL; }
+			//cout << "within " << acceptableError << " (" << acceptableErrorBytes << ")" << endl;
+		}
 		SIZE_T bytesRead = 0;
 		while (ptr < end) {
+			// TODO read a large contiguous block and check that rather than re-reading the same blocks over and over.
 			ReadProcessMemory(clientHandle, ptr, buffer, size, &bytesRead);
-			if (bytesRead == size && memcmp(memory, buffer, size) == 0) { return (LPCVOID)ptr; }
+			if (acceptableError == 0) {
+				if (bytesRead == size && memcmp(memory, buffer, size) == 0) { return (LPCVOID)ptr; }
+			} else {
+				if (bytesRead == size 
+				&& memcmp(memory+ acceptableErrorBytes, buffer+ acceptableErrorBytes, requiredMatchingBytes) == 0) {
+					// TODO this calculation isn't working right yet... REVERSE pointer de-reference (what references here?)
+					int diff = (int)buffer[acceptableErrorBytes-1] - (int)memory[acceptableErrorBytes - 1];
+					char itoabuffer[30];
+					int tinyStrSrc = 0;
+					char* tinystr = (char*)tinyStrSrc;
+					tinystr[0] = acceptableErrorBytes + 'a';
+					_itoa_s(diff, itoabuffer, 10);
+					metaData = String(tinystr) + String("D") + String(itoabuffer);
+					if (abs(diff) < (acceptableError & 0xff))
+					return (LPCVOID)ptr;
+				}
+			}
 			ptr++;
 		}
 		return NULL;
