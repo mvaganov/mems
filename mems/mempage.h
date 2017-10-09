@@ -1,5 +1,6 @@
 #pragma once
 #include "vector.h"
+#include "cyclebuffer.h"
 
 uint64_t getTotalSystemMemory() {
 	MEMORYSTATUSEX status;
@@ -36,51 +37,67 @@ struct MemPage {
 	MemPage(MemPage & copy) :min(copy.min), max(copy.max), searchHits(copy.searchHits) { }
 
 	// rename to something like 'memsearch'
-	LPCVOID indexOf(HANDLE clientHandle, String & metaData, const char * memory, SIZE_T size, LPCVOID startSearch = NULL, LPCVOID endSearch = NULL, int acceptableError = 0) {
+	LPCVOID indexOf(HANDLE clientHandle, String & metaData, const char * memory, SIZE_T size, 
+		LPCVOID startSearch = NULL, LPCVOID endSearch = NULL, int acceptableError = 0, CycleBuffer * cycleBuffer = nullptr) {
 		static BYTE*buffer = NULL;
 		static SIZE_T allocatedSize = 0;
 		if (startSearch == NULL) startSearch = min;
 		if (endSearch == NULL) endSearch = max;
 		BYTE* ptr = (BYTE*)startSearch, *end = (BYTE*)endSearch;
-		if (size != allocatedSize) {
+		if (size > allocatedSize) {
 			delete[] buffer;
 			buffer = NULL;
 			buffer = new BYTE[size];
 			allocatedSize = size;
 		}
-		int acceptableErrorBytes = 0, requiredMatchingBytes = (int)size;
-		if (acceptableError != 0) {
-			acceptableErrorBytes = 0;
-			int test = acceptableError;
-			while (test != 0) {
-				test = test >> 8;
-				acceptableErrorBytes++;
-			}
-			requiredMatchingBytes = (int)size - acceptableErrorBytes;
-			if (requiredMatchingBytes <= 0) { return NULL; }
-			//cout << "within " << acceptableError << " (" << acceptableErrorBytes << ")" << endl;
-		}
 		SIZE_T bytesRead = 0;
 		while (ptr < end) {
-			// TODO read a large contiguous block and check that rather than re-reading the same blocks over and over.
-			ReadProcessMemory(clientHandle, ptr, buffer, size, &bytesRead);
-			if (acceptableError == 0) {
-				if (bytesRead == size && memcmp(memory, buffer, size) == 0) { return (LPCVOID)ptr; }
+			if (cycleBuffer == nullptr) {
+				ReadProcessMemory(clientHandle, ptr, buffer, size, &bytesRead);
 			} else {
-				if (bytesRead == size 
-				&& memcmp(memory+ acceptableErrorBytes, buffer+ acceptableErrorBytes, requiredMatchingBytes) == 0) {
-					// TODO this calculation isn't working right yet... REVERSE pointer de-reference (what references here?)
-					int diff = (int)buffer[acceptableErrorBytes-1] - (int)memory[acceptableErrorBytes - 1];
-					char itoabuffer[30];
-					int tinyStrSrc = 0;
-					char* tinystr = (char*)tinyStrSrc;
-					tinystr[0] = acceptableErrorBytes + 'a';
-					_itoa_s(diff, itoabuffer, 10);
-					metaData = String(tinystr) + String("D") + String(itoabuffer);
-					if (abs(diff) < (acceptableError & 0xff))
-					return (LPCVOID)ptr;
+				printf("DOING thE ThiNG\n");
+				// TODO rotating-buffer check that rather than re-reading the same blocks over and over.
+				// if there are less than size bytes in the buffer, get CycleBuffer::DEFAULT_SEGMENT_SIZE-cycleBuffer->BytesLeftToRead() more bytes. unless size is more than CycleBuffer::DEFAULT_SEGMENT_SIZE, get size-BytesLeftToRead() in that case.
+				if (cycleBuffer->BytesLeftToRead() < size) {
+					if (cycleBuffer->BytesLeftToRead() == 0) {
+						printf("segments before %d\n", cycleBuffer->segments.length());
+						cycleBuffer->Add(nullptr, 0); // force a new end buffer segment
+						printf("segments after %d\n", cycleBuffer->segments.length());
+					}
+					int bytesToGet = (int)((size < CycleBuffer::DEFAULT_SEGMENT_SIZE) 
+						? (CycleBuffer::DEFAULT_SEGMENT_SIZE - cycleBuffer->BytesLeftToRead())
+						: (size - cycleBuffer->BytesLeftToRead()));
+					CycleBuffer::BufferSegment * bufseg = cycleBuffer->segments.last();
+					BYTE* directBuffer = bufseg->buffer + bufseg->bufferUsed;
+					int bytesHere = bufseg->bufferSize - bufseg->bufferUsed;
+					int bytesPossible = (int)(end - ptr);
+					if (bytesHere > bytesPossible) { bytesHere = bytesPossible; }
+					ReadProcessMemory(clientHandle, ptr, directBuffer, bytesHere, &bytesRead);
+					cycleBuffer->Add(nullptr, bytesHere);
+				}
+				long difference = (long)acceptableError;
+				int result = cycleBuffer->ReadCompare((BYTE*)memory, (int)size, 1, &difference);
+				switch (result) {
+				case CycleBuffer::NO_EQUALITY: break;
+				case CycleBuffer::SUCCESS: return (LPCVOID)ptr;
+				case CycleBuffer::NOT_ENOUGH_DATA_IN_BUFFER: { int i = 0; i = 1 / i; }break;
+				case CycleBuffer::NO_DATA_IN_BUFFER: { int i = 0; i = 1 / i; }break;
 				}
 			}
+			//// TODO put this in cycleBuffer->Read, and get the acceptableError code to deal with non-contiguous blocks in the segments by reading into a 4-byte buffer
+			//if (acceptableError == 0) {
+			//	if (bytesRead == size && memcmp(memory, buffer, size) == 0) { return (LPCVOID)ptr; }
+			//} else {
+			//	int64_t * buffPtr = (int64_t*)buffer;
+			//	int64_t * memPtr = (int64_t*)memory;
+			//	int64_t diff = (*buffPtr - *memPtr);
+			//	if(abs(diff) < acceptableError) {
+			//		char itoabuffer[30];
+			//		_itoa_s((int)diff, itoabuffer, 10);
+			//		metaData = String("D:") + String(itoabuffer);
+			//		return (LPCVOID)ptr;
+			//	}
+			//}
 			ptr++;
 		}
 		return NULL;

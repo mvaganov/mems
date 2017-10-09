@@ -114,6 +114,7 @@
     <ClCompile Include="main.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="cyclebuffer.h" />
     <ClInclude Include="string.h" />
     <ClInclude Include="mempage.h" />
     <ClInclude Include="mems.h" />

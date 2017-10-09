@@ -21,6 +21,8 @@ public:
 	}
 	void removeAt(int index) { this->erase(this->begin() + index); }
 	void insertAt(int index, T& element) { this->insert(begin() + index, element); }
+	T last() { return get((int)(size() - 1)); }
+	T pop() { T lastone = last(); removeAt((int)(size() - 1)); return lastone; }
 	ArrayList(initializer_list<T> l) : vector<T>(l) {}
 	void add(std::initializer_list<T> l) { this->insert(this->end(), l.begin(), l.end()); }
 	std::pair<const T*, std::size_t> c_arr() const {

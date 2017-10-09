@@ -5,6 +5,7 @@
 #include "platform_conio.h"
 #include "terminal.h"
 #include "mempage.h"
+#include "cyclebuffer.h"
 using namespace std;
 
 void printBits(uint64_t upTo64bits, int numbits) {
@@ -259,8 +260,8 @@ struct Mems {
 			clientHandle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pId);
 
 			if (!clientHandle) {
-				memset(mainBuffer, 0, sizeof(mainBuffer));
-				sprintf_s((char*)mainBuffer, sizeof(mainBuffer), "Could not open process \"%ld\".\n", pId);
+				memset(mainBuffer, 0, sizeof_mainBuffer);
+				sprintf_s((char*)mainBuffer, sizeof_mainBuffer, "Could not open process \"%ld\".\n", pId);
 				printf((const char*)mainBuffer);
 				selectSource();
 				return INIT_CANT_OPEN_PROCESS;
@@ -347,6 +348,7 @@ struct Mems {
 			printc((unsigned int)mainBuffer[i], bgcolor);
 		}
 		platform_setColor(7, 0);
+		// TODO print the file name being looked at, along with the process ID
 		if (page != NULL) {
 			printc('w', 15, 0); printc(-1); putchar(' ');
 			printc('a', 15, 0); printc(-1); putchar(' ');
@@ -370,8 +372,8 @@ struct Mems {
 		printf("char "); printc((unsigned int)mainBuffer[0]);
 		platform_setColor(7, 0);
 		uint64_t val = (uint64_t)*((uint64_t*)mainBuffer);//ptr);
-		printf(" %3d           int32 0x%08x,%13d\n", *mainBuffer, (uint32_t)val, (int32_t)val);//*ptr);
-		printf("             int64 0x%016llx, %20lli\n", (uint64_t)val, (int64_t)val);
+		printf(" %3d           int32 0x%08x,%21d\n", *mainBuffer, (uint32_t)val, (int32_t)val);//*ptr);
+		printf("             int64 0x%016llx,%21lli\n", (uint64_t)val, (int64_t)val);
 		printBits(val, 64); putchar('\n'); 
 		if (searchHits.size()) {
 			printf("result "); printc('F', 15, 0); printc(-1); printf(" %3d", currentSearchResult);
@@ -524,7 +526,7 @@ struct Mems {
 			memcpy(searchBuffer, &ptr, sizeof(ptr));
 			searchBufferUsed = sizeof(ptr);
 		} else {
-			if (take(args, "wchar") || take(args, "w")) { searchType = SEARCH_WCHAR; } else if (take(args, "chars")) { searchType = SEARCH_BYTES; } else if (take(args, "binary") || take(args, "bin")) { searchType = SEARCH_BINARY; } else if (take(args, "hex") || take(args, "h")) { searchType = SEARCH_HEX; } else if (take(args, "int8")) { searchType = SEARCH_INT8; } else if (take(args, "int16")) { searchType = SEARCH_INT16; } else if (take(args, "int32")) { searchType = SEARCH_INT32; } else if (take(args, "int64")) { searchType = SEARCH_INT64; }
+			if (take(args, "wchar") || take(args, "w")) { searchType = SEARCH_WCHAR; } else if (take(args, "char")) { searchType = SEARCH_BYTES; } else if (take(args, "binary") || take(args, "bin")) { searchType = SEARCH_BINARY; } else if (take(args, "hex") || take(args, "h")) { searchType = SEARCH_HEX; } else if (take(args, "int8")) { searchType = SEARCH_INT8; } else if (take(args, "int16")) { searchType = SEARCH_INT16; } else if (take(args, "int32")) { searchType = SEARCH_INT32; } else if (take(args, "int64")) { searchType = SEARCH_INT64; }
 			int valueIndex = 1;
 			if (args.length() > valueIndex) {
 				String s = args[valueIndex];
@@ -585,6 +587,7 @@ struct Mems {
 	int find_pageIndex;
 	uint64_t find_chunkStart;
 	ArrayList<MemPage*> find_memPageSearchOrder;
+	CycleBuffer find_cycleBuffer;
 	void find_begin() {
 		//printf("looking for: "); for (int i = 0; i < searchBufferUsed; ++i) { printf("%02x", searchBuffer[i]); } printf("\n");
 		searchHits.clear();
@@ -594,6 +597,7 @@ struct Mems {
 		for (int i = 0; i < pages.count(); ++i) {
 			pages.mempages[i]->searchHits = 0;
 		}
+		find_cycleBuffer.clean();
 	}
 	void keepSearchOrderListCurrent() {
 		if (find_memPageSearchOrder.size() != pages.count()) {
@@ -605,6 +609,7 @@ struct Mems {
 			//cout << "search list is " << find_memPageSearchOrder.size() << endl;
 		}
 	}
+
 	bool find_active(int find_chunkSize) {
 		//cout << ".";
 		keepSearchOrderListCurrent();
@@ -639,7 +644,8 @@ struct Mems {
 		} while (nextPage);
 		String metadata;
 		do {
-			found = (BYTE*)thePage->indexOf(clientHandle, metadata, searchBuffer, searchBufferUsed, (LPCVOID)start, (LPCVOID)end, searchRange);
+			found = (BYTE*)thePage->indexOf(clientHandle, metadata, searchBuffer, searchBufferUsed, (LPCVOID)start, (LPCVOID)end, 
+				searchRange, nullptr);// &find_cycleBuffer);
 			if (found != NULL) {
 				searchHits.Add(Mems::SearchHit((LPCVOID)found, find_pageIndex, metadata));
 				start = (found + 1);
@@ -749,8 +755,8 @@ void Mems::addCommands() {
 		running = false;
 		return 0;
 	}));
-	terminal.add(Terminal::CMD("find", "usage: find [chars|wchars|int8|int16|int32|int64|hex|binary] <value>\nusage: ptr [distance from value]\n"
-		"summary: searches known memory pages for the specified value.\nexample: find wchars \"Hello World!\"\nexample: find hex baadf00d", 
+	terminal.add(Terminal::CMD("find", "usage: find [char|wchar|int8|int16|int32|int64|hex|binary] <value>\nusage: ptr [distance from value]\n"
+		"summary: searches known memory pages for the specified value.\nexample: find wchar \"Hello World!\"\nexample: find hex baadf00d", 
 		[this](ArrayList<String> & args)->int {
 		find(args);
 		return 0;
