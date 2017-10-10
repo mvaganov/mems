@@ -38,8 +38,5 @@
     <ClInclude Include="string.h">
       <Filter>Source Files</Filter>
     </ClInclude>
-    <ClInclude Include="cyclebuffer.h">
-      <Filter>Source Files</Filter>
-    </ClInclude>
   </ItemGroup>
 </Project>

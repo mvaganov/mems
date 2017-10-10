@@ -65,10 +65,8 @@ struct MemPage {
 	MemPage(LPCVOID start, LPCVOID end) :min(start), max(end), searchHits(0) {}
 	MemPage(MemPage & copy) :min(copy.min), max(copy.max), searchHits(copy.searchHits) { }
 
-	ReadProcessMemoryCache memcache;
-
 	LPCVOID memsearch(HANDLE clientHandle, String & metaData, const char * memory, SIZE_T size, 
-		LPCVOID startSearch = nullptr, LPCVOID endSearch = nullptr, int acceptableError = 0) {
+		LPCVOID startSearch = nullptr, LPCVOID endSearch = nullptr, int acceptableError = 0, ReadProcessMemoryCache * memcache = nullptr) {
 		if (startSearch == nullptr) startSearch = min;
 		if (endSearch == nullptr) endSearch = max;
 		uint64_t delta = (int64_t)endSearch - (int64_t)startSearch;
@@ -80,16 +78,16 @@ struct MemPage {
 				bufferAllocate = size;
 			}
 		}
-		memcache.AssertBufferSize(bufferAllocate);
-		bool forceRereadEveryTime = false;
+		memcache->AssertBufferSize(bufferAllocate);
 		SIZE_T bytesRead = 0;
 		BYTE* relevantBufferPtr;
 		while (ptr < end) {
-			if (forceRereadEveryTime) {
-				ReadProcessMemory(clientHandle, ptr, memcache.buffer, size, &bytesRead); // inefficient but real-time search
-				relevantBufferPtr = memcache.buffer;
+			if (memcache) {
+				relevantBufferPtr = memcache->GetCachedMemory(clientHandle, ptr, size, end, bytesRead);
 			} else {
-				relevantBufferPtr = memcache.GetCachedMemory(clientHandle, ptr, size, end, bytesRead);
+				// TODO create some buffer some other way...
+				ReadProcessMemory(clientHandle, ptr, memcache->buffer, size, &bytesRead); // inefficient but real-time search
+				relevantBufferPtr = memcache->buffer;
 			}
 			if (acceptableError == 0) {
 				if (bytesRead > 0 && memcmp(memory, relevantBufferPtr, size) == 0) { return (LPCVOID)ptr; }

@@ -624,7 +624,8 @@ struct Mems {
 	uint64_t find_chunkStart;
 	ArrayList<MemPage*> find_memPageSearchOrder;
 	void find_begin() {
-		//printf("looking for: "); for (int i = 0; i < searchBufferUsed; ++i) { printf("%02x", searchBuffer[i]); } printf("\n"); platform_getch();
+		// TODO find out why second search (after all pages searched) fails
+		printf("looking for: "); for (int i = 0; i < searchBufferUsed; ++i) { printf("%02x", searchBuffer[i]); } printf("\n"); platform_getch();
 		searchHits.clear();
 		currentSearchResult = 0;
 		find_pageIndex = 0;
@@ -644,6 +645,7 @@ struct Mems {
 		}
 	}
 
+	ReadProcessMemoryCache memcache;
 	bool find_active(int find_chunkSize) {
 		keepSearchOrderListCurrent();
 		if (find_pageIndex >= find_memPageSearchOrder.size()) {
@@ -680,7 +682,7 @@ struct Mems {
 		do {
 			//cout << "Searching " << (end-start) << "bytes from " << (uint64_t)start << endl;
 			found = (BYTE*)thePage->memsearch(clientHandle, metadata, searchBuffer, searchBufferUsed, 
-				(LPCVOID)start, (LPCVOID)end, searchRange);
+				(LPCVOID)start, (LPCVOID)end, searchRange, &memcache);
 			if (found != NULL) {
 				searchHits.Add(Mems::SearchHit((LPCVOID)found, find_pageIndex, metadata));
 				start = (found + 1);
