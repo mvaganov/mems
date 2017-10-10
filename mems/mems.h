@@ -5,11 +5,13 @@
 #include "platform_conio.h"
 #include "terminal.h"
 #include "mempage.h"
-#include "cyclebuffer.h"
 using namespace std;
 
 void printBits(uint64_t upTo64bits, int numbits) {
-	for (int i = numbits - 1; i >= 0; i--) { putchar((upTo64bits & (1ull << i)) ? '1' : '0'); }
+	for (int i = numbits - 1; i >= 0; i--) {
+		putchar((upTo64bits & (1ull << i)) ? '1' : '0');
+		if (i && i % 8 == 0)putchar(' ');
+	}
 }
 char convertNum(char c) {
 	if (c < 10) { return '0' + c; }
@@ -109,34 +111,39 @@ BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
 	return TRUE;
 }
 
-static const char * __animation = "-\\|/";
-static int __animLen = (int)strlen(__animation);
+//static const char * __animation = "-\\|/";
+//static int __animLen = (int)strlen(__animation);
 static int __aninmation_iterations = 0;
-void __printAnimation() {
-	printf("\r%c ", __animation[++__aninmation_iterations%__animLen]);
+void __printAnimation(string animation) {
+	printf("\r%c ", animation[++__aninmation_iterations%animation.size()]);
 }
 
 struct CooperativeProcess {
+	string label, animation;
 	function<void()> begin;
 	function<bool()> active;
 	function<void()> end;
+	function<string()> status;
 	static const int STATE_UNINIT = 0;
 	static const int STATE_STARTED = 1;
 	static const int STATE_FINISHING = 2;
 	static const int STATE_DONE = 3;
 	int state;
-	void setup(function<void()> begin, function<bool()> active, function<void()> end){
+	void setup(string label, string animation, function<void()> begin, function<bool()> active, function<void()> end, function<string()> status){
+		this->label = label;
+		this->animation = animation;
 		this->begin = begin;
 		this->active = active;
 		this->end = end;
+		this->status = status;
 		this->state = STATE_UNINIT;
 	}
-	CooperativeProcess() { setup(NULL, NULL, NULL); }
+	CooperativeProcess() { setup("<untitled>","!?.,:", nullptr, nullptr, nullptr, nullptr); }
 	bool run() {
 		switch (state) {
-		case STATE_UNINIT: if (begin != NULL) { begin(); } state++;  break;
+		case STATE_UNINIT: if (begin != nullptr) { begin(); } state++;  break;
 		case STATE_STARTED: if (!active()) { state++; } break;
-		case STATE_FINISHING: if (end != NULL) { end(); } state++; break;
+		case STATE_FINISHING: if (end != nullptr) { end(); } state++; break;
 		}
 		return state != STATE_DONE;
 	}
@@ -146,6 +153,7 @@ struct CooperativeProcess {
 
 struct Mems {
 	String WINDOW_NAME;
+	uint32_t PID;
 	BYTE * ptr;
 	HWND hwnd;
 	HANDLE clientHandle;
@@ -187,9 +195,13 @@ struct Mems {
 		}
 	}
 
-	CooperativeProcess searchingForMemoryPages;
-	CooperativeProcess findOperation;
+	void ClearLine() { putchar('\r'); for (int i = 0; i < consoleWidth - 1; ++i)putchar(' '); }
+
+	CooperativeProcess memPageDiscovery;
+	CooperativeProcess find_operation;
 	ArrayList<CooperativeProcess*> processStack;
+
+	CooperativeProcess* CurrentCProc() { return (processStack.size() > 0) ? processStack[processStack.size() - 1] : NULL; }
 
 	int __startState;
 	Mems() : WINDOW_NAME("Untitled - Notepad"),ptr(0), hwnd(0), clientHandle(0), sizeof_mainBuffer(0),
@@ -198,25 +210,49 @@ struct Mems {
 		addCommands();
 		EnablePriv(SE_DEBUG_NAME); // enable this program to be accessed by other programs
 
-		searchingForMemoryPages.setup(
+		memPageDiscovery.setup("page discovery", "pqdb",//"ODPB80QqpbdcoCG",
 			[this]()->void { __startState = pages.count(); },
 			[this]()->bool { 
 				int pageCount = pages.count();
 				bool result = pages.continueGenerate(100);
-				if (pageCount != pages.count()) { userinput = 1; }
+				if (pageCount != pages.count()) {  // if a change happened
+					userinput = 1; // trigger a 'button press' to refresh the UI
+				}
 				return result;
 			},
-			[this]()->void { if (__startState != pages.count()) { saveMemoryPageSearch(); }}
+			[this]()->void { if (__startState != pages.count()) { saveMemoryPageSearch(); }},
+			[this]()->string {
+				char buffer[120];
+				sprintf_s(buffer, "page discovery%4d/%4d, explored %5.2f%% (@resolution %d)   ", 
+					pages.checked, pages.count(), (pages.generator->iterator*100.0f/pages.generator->incrementCount), (int)pages.generator->increment);
+				return string(buffer);
+			}
 		);
-		findOperation.setup(
+		find_operation.setup("find operation", "\\\\||//--",
 			[this]()->void { find_begin(); },
 			[this]()->bool {
 				int resultCount = (int)searchHits.size();
 				bool result = find_active(1024);
-				if (resultCount != searchHits.size()) { userinput = 1; }
+				if (resultCount != searchHits.size()) { // if a change happened
+					userinput = 1; // trigger a 'button press' to refresh the UI
+				}
 				return result;
 			},
-			[this]()->void { find_end();  }
+			[this]()->void { find_end();  },
+			[this]()->string {
+				char buffer[120];
+				buffer[0] = 0;
+				if (find_memPageSearchOrder.size() == 0) {
+					sprintf_s(buffer, "starting find operation");
+				} else {
+					float percent = 100;
+					if (find_pageIndex < find_memPageSearchOrder.length()) {
+						percent = (float)find_chunkStart * 100 / find_memPageSearchOrder[find_pageIndex]->size();
+					}
+					sprintf_s(buffer, "find %4d/%4d (%5.1f%%)", find_pageIndex, (int)find_memPageSearchOrder.size(), percent);
+				}
+				return string(buffer);
+			}
 		);
 	}
 	void addCommands();
@@ -240,6 +276,7 @@ struct Mems {
 			_itoa_s(pId, (char*)mainBuffer, sizeof_mainBuffer, 10);
 			WINDOW_NAME = String("pId ") + String((char*)mainBuffer);
 		}
+		PID = pId;
 		updateBasedOnConsoleSize();
 		bytesRead = -1;
 		if (hwnd == NULL && pId == 0) {
@@ -283,12 +320,11 @@ struct Mems {
 		}
 
 		if (pages.count() == 0) {
-			printf("searching for a memory page...\n");
-			while (pages.count() == 0 && pages.continueGenerate(10000)) { __printAnimation(); }
+			printf("  searching for a memory page...");
+			while (pages.count() == 0 && memPageDiscovery.active()) { __printAnimation(memPageDiscovery.animation); }
 			saveMemoryPageSearch();
-			printf("found a page!");
 		}
-		processStack.Add(&searchingForMemoryPages);
+		processStack.Add(&memPageDiscovery);
 
 		memset(mainBuffer, 0, sizeof_mainBuffer);
 		running = true;
@@ -348,7 +384,7 @@ struct Mems {
 			printc((unsigned int)mainBuffer[i], bgcolor);
 		}
 		platform_setColor(7, 0);
-		// TODO print the file name being looked at, along with the process ID
+		printf("\"%s\" (%d)\n", WINDOW_NAME.c_str(), PID);
 		if (page != NULL) {
 			printc('w', 15, 0); printc(-1); putchar(' ');
 			printc('a', 15, 0); printc(-1); putchar(' ');
@@ -364,33 +400,30 @@ struct Mems {
 			printf("%8.2f%% in pg%d", (page->percentageOf((LPCVOID)ptr) * 100), pageIndex);
 		}putchar('\n');
 		if (page != NULL) {
-			printf("page "); printc('<', 15, 0); printc(-1); printf(" %3d", pageIndex);
-			printf("/%3d ", pages.count()); printc('>', 15, 0); printc(-1);
+			printf("page "); printc('<', 15, 0); printc(-1); printf(" %4d", pageIndex);
+			printf("/%4d ", pages.count()); printc('>', 15, 0); printc(-1);
 			printf("  [0x%016llx to ", (uint64_t)page->min);
 			printf("0x%016llx", (uint64_t)page->max); printf(") %lldB", page->size());
 		}putchar('\n');
-		printf("char "); printc((unsigned int)mainBuffer[0]);
+		printf("int8 "); printc((unsigned int)mainBuffer[0]);
 		platform_setColor(7, 0);
 		uint64_t val = (uint64_t)*((uint64_t*)mainBuffer);//ptr);
-		printf(" %3d           int32 0x%08x,%21d\n", *mainBuffer, (uint32_t)val, (int32_t)val);//*ptr);
-		printf("             int64 0x%016llx,%21lli\n", (uint64_t)val, (int64_t)val);
-		printBits(val, 64); putchar('\n'); 
-		if (searchHits.size()) {
-			printf("result "); printc('F', 15, 0); printc(-1); printf(" %3d", currentSearchResult);
-			printf("/%3d ", (int)searchHits.size()); printc('f', 15, 0); printc(-1);
+		printf(", 0x%02x, %5d;  int32 0x%08x,%21d\n", *mainBuffer, (char)*mainBuffer, (uint32_t)val, (int32_t)val);//*ptr);
+		printf("int16%7d; int64 0x%016llx,%21lli\n", (int16_t)val, (int64_t)val, (int64_t)val);
+		printBits(val, 64); printf(" binary\n");
+		CooperativeProcess * cproc = CurrentCProc();
+		if (cproc == &find_operation) {
+			printf("result "); printc('F', 15, 0); printc(-1); printf(" %4d", currentSearchResult);
+			printf("/%4d ", (int)searchHits.size()); printc('f', 15, 0); printc(-1);
 			if (searchHits.size() > currentSearchResult) {
-				printf(" [0x%016llx pg%3d%.8s] ", (uint64_t)searchHits[currentSearchResult].addr, pageIndex, searchHits[currentSearchResult].metadata.c_str());
+				printf(" [0x%016llx pg%4d%.8s] ", 
+					(uint64_t)searchHits[currentSearchResult].addr, 
+					pageIndex, searchHits[currentSearchResult].metadata.c_str());
 			} else {
 				printf(" [search result ptr , page ???] ");
 			}
-			if (find_pageIndex >= 0 && find_pageIndex < find_memPageSearchOrder.size()) {
-				printf("searching%3d/%3d (%5.1f%%)", find_pageIndex, (int)find_memPageSearchOrder.size(),
-					(float)find_chunkStart * 100 / find_memPageSearchOrder[find_pageIndex]->size());
-			} else {
-				printf("                             ");
-			}
 		} else {
-			for (int i = 0; i < consoleWidth - 1; ++i)putchar(' ');
+			ClearLine();
 			putchar('\r');
 			platform_setColor(0, 15);
 			printf("space"); printc(-1); putchar(' ');
@@ -399,7 +432,7 @@ struct Mems {
 			platform_setColor(0, 15);
 			printf("enter"); printc(-1); putchar(' ');
 		}
-		printf("\n   (%010.7f%% total memory scanned, %3d/%3d scavenged)", pages.percentageProgress*100, pages.checked, pages.count());
+		printf("\n");
 	}
 	void input() {
 		userinput = 0;
@@ -411,11 +444,11 @@ struct Mems {
 				userinput = platform_getch();
 			} else {
 				time_t soon = clock() + 50;
-				CooperativeProcess * cproc = (processStack.size() > 0) ? processStack[processStack.size() - 1] : NULL;
+				CooperativeProcess * cproc = CurrentCProc();
 				bool keepRunning;
 				do { keepRunning = (cproc == NULL) || cproc->run(); } while (keepRunning && !platform_kbhit() && clock() < soon);
 				if (!keepRunning) { processStack.removeAt((int)processStack.size() - 1); }
-				__printAnimation();
+				if (cproc) { __printAnimation(cproc->animation); cout << " " << cproc->status(); }
 			}
 		} while (userinput == 0);
 	}
@@ -473,6 +506,7 @@ struct Mems {
 			if(page != NULL) {
 				uint64_t whereThisIsPointing = *((uint64_t*)(mainBuffer));
 				uint64_t tmpBuffer;
+				// check to see if this pointer is an actual pointer...
 				if (ReadProcessMemory(clientHandle, (LPCVOID)whereThisIsPointing, &tmpBuffer, sizeof(tmpBuffer), &bytesRead)) {
 					jumpMemory((BYTE*)whereThisIsPointing);
 				}
@@ -511,6 +545,7 @@ struct Mems {
 	static const int SEARCH_INT16 = 5;
 	static const int SEARCH_INT32 = 6;
 	static const int SEARCH_INT64 = 7;
+	static const char* SEARCH_TYPE_NAME[];
 
 	bool take(ArrayList<String> & args, String s) {
 		int i = args.indexOf(s);
@@ -526,7 +561,7 @@ struct Mems {
 			memcpy(searchBuffer, &ptr, sizeof(ptr));
 			searchBufferUsed = sizeof(ptr);
 		} else {
-			if (take(args, "wchar") || take(args, "w")) { searchType = SEARCH_WCHAR; } else if (take(args, "char")) { searchType = SEARCH_BYTES; } else if (take(args, "binary") || take(args, "bin")) { searchType = SEARCH_BINARY; } else if (take(args, "hex") || take(args, "h")) { searchType = SEARCH_HEX; } else if (take(args, "int8")) { searchType = SEARCH_INT8; } else if (take(args, "int16")) { searchType = SEARCH_INT16; } else if (take(args, "int32")) { searchType = SEARCH_INT32; } else if (take(args, "int64")) { searchType = SEARCH_INT64; }
+			if (take(args, "wchar") || take(args, "w")) { searchType = SEARCH_WCHAR; } else if (take(args, "char") || take(args, "c")) { searchType = SEARCH_BYTES; } else if (take(args, "binary") || take(args, "bin")) { searchType = SEARCH_BINARY; } else if (take(args, "hex") || take(args, "h")) { searchType = SEARCH_HEX; } else if (take(args, "int8")) { searchType = SEARCH_INT8; } else if (take(args, "int16")) { searchType = SEARCH_INT16; } else if (take(args, "int32")) { searchType = SEARCH_INT32; } else if (take(args, "int64")) { searchType = SEARCH_INT64; }
 			int valueIndex = 1;
 			if (args.length() > valueIndex) {
 				String s = args[valueIndex];
@@ -535,7 +570,7 @@ struct Mems {
 				searchBuffer[searchBufferUsed] = '\0';
 			} else {
 				putchar('\n');
-				for (int i = 0; i < this->consoleWidth - 1; ++i) { putchar(' '); }
+				ClearLine();
 				putchar('\r');
 				cout << "search term: ";
 				cin.getline(searchBuffer, sizeof(searchBuffer));
@@ -576,20 +611,20 @@ struct Mems {
 				break;
 			}
 		}
-		int idx = processStack.indexOf(&findOperation);
+		//printf("search type: %s\n", SEARCH_TYPE_NAME[searchType]); platform_getch();
+		int idx = processStack.indexOf(&find_operation);
 		if (idx >= 0) {
 			processStack[idx]->reset();
 		} else {
-			processStack.Add(&findOperation);
+			processStack.Add(&find_operation);
 		}
 	}
 
 	int find_pageIndex;
 	uint64_t find_chunkStart;
 	ArrayList<MemPage*> find_memPageSearchOrder;
-	CycleBuffer find_cycleBuffer;
 	void find_begin() {
-		//printf("looking for: "); for (int i = 0; i < searchBufferUsed; ++i) { printf("%02x", searchBuffer[i]); } printf("\n");
+		//printf("looking for: "); for (int i = 0; i < searchBufferUsed; ++i) { printf("%02x", searchBuffer[i]); } printf("\n"); platform_getch();
 		searchHits.clear();
 		currentSearchResult = 0;
 		find_pageIndex = 0;
@@ -597,7 +632,6 @@ struct Mems {
 		for (int i = 0; i < pages.count(); ++i) {
 			pages.mempages[i]->searchHits = 0;
 		}
-		find_cycleBuffer.clean();
 	}
 	void keepSearchOrderListCurrent() {
 		if (find_memPageSearchOrder.size() != pages.count()) {
@@ -611,7 +645,6 @@ struct Mems {
 	}
 
 	bool find_active(int find_chunkSize) {
-		//cout << ".";
 		keepSearchOrderListCurrent();
 		if (find_pageIndex >= find_memPageSearchOrder.size()) {
 			//cout << "no more to search... " << find_memPageSearchOrder.size() << endl;
@@ -621,6 +654,7 @@ struct Mems {
 		BYTE* start, *end, *found;
 		bool nextPage;
 		uint64_t chunkSize = find_chunkSize;
+		// calculate the beginning and end of the find operation this function-call
 		do {
 			nextPage = false;
 			start = ((BYTE*)thePage->min + find_chunkStart);
@@ -644,8 +678,9 @@ struct Mems {
 		} while (nextPage);
 		String metadata;
 		do {
-			found = (BYTE*)thePage->indexOf(clientHandle, metadata, searchBuffer, searchBufferUsed, (LPCVOID)start, (LPCVOID)end, 
-				searchRange, nullptr);// &find_cycleBuffer);
+			//cout << "Searching " << (end-start) << "bytes from " << (uint64_t)start << endl;
+			found = (BYTE*)thePage->memsearch(clientHandle, metadata, searchBuffer, searchBufferUsed, 
+				(LPCVOID)start, (LPCVOID)end, searchRange);
 			if (found != NULL) {
 				searchHits.Add(Mems::SearchHit((LPCVOID)found, find_pageIndex, metadata));
 				start = (found + 1);
@@ -727,11 +762,14 @@ struct Mems {
 					if (it == __windowsProcTable.begin()) { it = __windowsProcTable.end(); } it--; break;
 				case 's': case 'd':
 					it++; if (it == __windowsProcTable.end()) { it = __windowsProcTable.begin(); } break;
-				case '\n': case '\r': selected = it->first; hasTitle = true; break;
+				case '\n': case '\r': selected = it->first; hasTitle = true; 
+					break;
 				}
 			} else {
-				printf("\r%ld\r", it->second[index]);
-				userInput = platform_getch();
+				printf("\rpID %ld\r", it->second[index]);
+				if (it->second.length() == 1) { userInput = '\n'; }
+				else if (it->second.length() == 0) { userInput = 27; }
+				else { userInput = platform_getch(); }
 				switch (userInput) {
 				case 'a':
 					if (index == 0) { index = it->second.length(); } index--; break;
@@ -749,6 +787,9 @@ struct Mems {
 		return hasTitle;
 	}
 };
+
+const char* Mems::SEARCH_TYPE_NAME[] = { "byte","wchar","hex","bin","int8","int16","int32","int64" };
+
 
 void Mems::addCommands() {
 	terminal.add(Terminal::CMD("quit", "summary: quits this program", [this](ArrayList<String> & args)->int {

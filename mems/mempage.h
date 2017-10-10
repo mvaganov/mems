@@ -1,6 +1,5 @@
 #pragma once
 #include "vector.h"
-#include "cyclebuffer.h"
 
 uint64_t getTotalSystemMemory() {
 	MEMORYSTATUSEX status;
@@ -17,6 +16,36 @@ uint64_t getTotalSystemMemory() {
 	return status.ullAvailVirtual;
 	//return status.ullTotalPhys;
 }
+
+struct ReadProcessMemoryCache {
+	BYTE*  buffer;
+	SIZE_T buffersize;
+	BYTE * currentlyBufferingFrom;
+	SIZE_T currentlyBuffered;
+	void   buffercleanup() { if (buffer) { delete [] buffer; buffer = nullptr; } }
+	ReadProcessMemoryCache() :buffer(nullptr), buffersize(0), currentlyBufferingFrom(nullptr), currentlyBuffered(0){}
+	~ReadProcessMemoryCache() { buffercleanup(); }
+	void AssertBufferSize(SIZE_T bufferAllocate) {
+		if (bufferAllocate > buffersize) {
+			buffersize = bufferAllocate;
+			buffercleanup();
+			buffer = new BYTE[buffersize];
+		}
+	}
+	BYTE* GetCachedMemory(HANDLE clientHandle, BYTE * ptr, SIZE_T size, BYTE * limit, SIZE_T & bytesRead) {
+		// if there is no cache, or the area being looked for is outside the cache
+		if (currentlyBufferingFrom == nullptr
+			|| ptr < currentlyBufferingFrom || ptr + size > currentlyBufferingFrom + currentlyBuffered) {
+			// we need to recache. find out the correct amount of memory to grab with ReadProcessMemory
+			currentlyBufferingFrom = ptr;
+			currentlyBuffered = buffersize;
+			// make sure we don't over-shoot. endSearch is there for a reason, it could be a memory boundary
+			if (ptr + currentlyBuffered > limit) { currentlyBuffered = (SIZE_T)(limit - ptr); }
+			::ReadProcessMemory(clientHandle, currentlyBufferingFrom, buffer, currentlyBuffered, &bytesRead);
+		}
+		return buffer + (ptr - currentlyBufferingFrom);
+	}
+};
 
 struct MemPage {
 	LPCVOID min, max;
@@ -36,77 +65,52 @@ struct MemPage {
 	MemPage(LPCVOID start, LPCVOID end) :min(start), max(end), searchHits(0) {}
 	MemPage(MemPage & copy) :min(copy.min), max(copy.max), searchHits(copy.searchHits) { }
 
-	// rename to something like 'memsearch'
-	LPCVOID indexOf(HANDLE clientHandle, String & metaData, const char * memory, SIZE_T size, 
-		LPCVOID startSearch = NULL, LPCVOID endSearch = NULL, int acceptableError = 0, CycleBuffer * cycleBuffer = nullptr) {
-		static BYTE*buffer = NULL;
-		static SIZE_T allocatedSize = 0;
-		if (startSearch == NULL) startSearch = min;
-		if (endSearch == NULL) endSearch = max;
+	ReadProcessMemoryCache memcache;
+
+	LPCVOID memsearch(HANDLE clientHandle, String & metaData, const char * memory, SIZE_T size, 
+		LPCVOID startSearch = nullptr, LPCVOID endSearch = nullptr, int acceptableError = 0) {
+		if (startSearch == nullptr) startSearch = min;
+		if (endSearch == nullptr) endSearch = max;
+		uint64_t delta = (int64_t)endSearch - (int64_t)startSearch;
 		BYTE* ptr = (BYTE*)startSearch, *end = (BYTE*)endSearch;
-		if (size > allocatedSize) {
-			delete[] buffer;
-			buffer = NULL;
-			buffer = new BYTE[size];
-			allocatedSize = size;
+		uint64_t bufferAllocate = delta + size;
+		if (bufferAllocate > 2000) {
+			bufferAllocate = 2000;
+			if (bufferAllocate < size) {
+				bufferAllocate = size;
+			}
 		}
+		memcache.AssertBufferSize(bufferAllocate);
+		bool forceRereadEveryTime = false;
 		SIZE_T bytesRead = 0;
+		BYTE* relevantBufferPtr;
 		while (ptr < end) {
-			if (cycleBuffer == nullptr) {
-				ReadProcessMemory(clientHandle, ptr, buffer, size, &bytesRead);
+			if (forceRereadEveryTime) {
+				ReadProcessMemory(clientHandle, ptr, memcache.buffer, size, &bytesRead); // inefficient but real-time search
+				relevantBufferPtr = memcache.buffer;
 			} else {
-				printf("DOING thE ThiNG\n");
-				// TODO rotating-buffer check that rather than re-reading the same blocks over and over.
-				// if there are less than size bytes in the buffer, get CycleBuffer::DEFAULT_SEGMENT_SIZE-cycleBuffer->BytesLeftToRead() more bytes. unless size is more than CycleBuffer::DEFAULT_SEGMENT_SIZE, get size-BytesLeftToRead() in that case.
-				if (cycleBuffer->BytesLeftToRead() < size) {
-					if (cycleBuffer->BytesLeftToRead() == 0) {
-						printf("segments before %d\n", cycleBuffer->segments.length());
-						cycleBuffer->Add(nullptr, 0); // force a new end buffer segment
-						printf("segments after %d\n", cycleBuffer->segments.length());
-					}
-					int bytesToGet = (int)((size < CycleBuffer::DEFAULT_SEGMENT_SIZE) 
-						? (CycleBuffer::DEFAULT_SEGMENT_SIZE - cycleBuffer->BytesLeftToRead())
-						: (size - cycleBuffer->BytesLeftToRead()));
-					CycleBuffer::BufferSegment * bufseg = cycleBuffer->segments.last();
-					BYTE* directBuffer = bufseg->buffer + bufseg->bufferUsed;
-					int bytesHere = bufseg->bufferSize - bufseg->bufferUsed;
-					int bytesPossible = (int)(end - ptr);
-					if (bytesHere > bytesPossible) { bytesHere = bytesPossible; }
-					ReadProcessMemory(clientHandle, ptr, directBuffer, bytesHere, &bytesRead);
-					cycleBuffer->Add(nullptr, bytesHere);
-				}
-				long difference = (long)acceptableError;
-				int result = cycleBuffer->ReadCompare((BYTE*)memory, (int)size, 1, &difference);
-				switch (result) {
-				case CycleBuffer::NO_EQUALITY: break;
-				case CycleBuffer::SUCCESS: return (LPCVOID)ptr;
-				case CycleBuffer::NOT_ENOUGH_DATA_IN_BUFFER: { int i = 0; i = 1 / i; }break;
-				case CycleBuffer::NO_DATA_IN_BUFFER: { int i = 0; i = 1 / i; }break;
+				relevantBufferPtr = memcache.GetCachedMemory(clientHandle, ptr, size, end, bytesRead);
+			}
+			if (acceptableError == 0) {
+				if (bytesRead > 0 && memcmp(memory, relevantBufferPtr, size) == 0) { return (LPCVOID)ptr; }
+			} else {
+				int64_t * buffPtr = (int64_t*)relevantBufferPtr, *memPtr = (int64_t*)memory;
+				int64_t diff = (*buffPtr - *memPtr);
+				if (abs(diff) < acceptableError) {
+					metaData = String("D:") + std::to_string(diff);
+					return (LPCVOID)ptr;
 				}
 			}
-			//// TODO put this in cycleBuffer->Read, and get the acceptableError code to deal with non-contiguous blocks in the segments by reading into a 4-byte buffer
-			//if (acceptableError == 0) {
-			//	if (bytesRead == size && memcmp(memory, buffer, size) == 0) { return (LPCVOID)ptr; }
-			//} else {
-			//	int64_t * buffPtr = (int64_t*)buffer;
-			//	int64_t * memPtr = (int64_t*)memory;
-			//	int64_t diff = (*buffPtr - *memPtr);
-			//	if(abs(diff) < acceptableError) {
-			//		char itoabuffer[30];
-			//		_itoa_s((int)diff, itoabuffer, 10);
-			//		metaData = String("D:") + String(itoabuffer);
-			//		return (LPCVOID)ptr;
-			//	}
-			//}
 			ptr++;
 		}
-		return NULL;
+		return nullptr;
 	}
 };
 
 // if it returns true, that should signal that we're done.
 typedef bool(*FPTR_foundOne)(MemPage * mb, double percentageDone);
 
+// the entire collection of MemPages
 struct CustomMemPageListing {
 	HANDLE clientHandle;
 	ArrayList<MemPage*> mempages;
@@ -135,6 +139,8 @@ struct CustomMemPageListing {
 		uint64_t increment, incrementCount, lastIncrement, maxChecks, iterator;
 		uint64_t pageCheckCursor;
 		static const uint64_t stdPageSize = 4096;
+		ReadProcessMemoryCache memcache;
+
 		GenerationState(HANDLE clientHandle, FPTR_foundOne foundOneCallback)
 			:clientHandle(clientHandle), pageCheckCursor(0) {
 			this->foundOneCallback = foundOneCallback;
@@ -153,17 +159,26 @@ struct CustomMemPageListing {
 			if (pageCheckCursor == 0) {
 				pageCheckCursor = (uint64_t)page->min;
 			}
-			uint64_t end = (uint64_t)page->max - sizeof(LPCVOID);
+			SIZE_T size = sizeof(LPCVOID);
+			uint64_t end = (uint64_t)page->max - size;
 			uint64_t memoryLocation, bytesRead = 0, goDeeper;
+			SIZE_T delta = end - pageCheckCursor;
+			uint64_t bufferAllocate = delta + size;
+			if (bufferAllocate > 2000) {
+				bufferAllocate = 2000;
+				if (bufferAllocate < size) {
+					bufferAllocate = size;
+				}
+			}
+			memcache.AssertBufferSize(bufferAllocate);
 			while (pageCheckCursor < end) {
-				ReadProcessMemory(clientHandle, (LPCVOID)pageCheckCursor, &memoryLocation, sizeof(uint64_t), &bytesRead);
+				//ReadProcessMemory(clientHandle, (LPCVOID)pageCheckCursor, &memoryLocation, sizeof(uint64_t), &bytesRead);
+				memoryLocation = *((uint64_t*)memcache.GetCachedMemory(clientHandle, (BYTE*)pageCheckCursor, sizeof(uint64_t), (BYTE*)end, bytesRead));
 				if (bytesRead > 0) {
 					LPCVOID actualPointer = (LPCVOID)memoryLocation;
 					goDeeper = 0;
 					bool worked = ReadProcessMemory(clientHandle, actualPointer, &goDeeper, sizeof(uint64_t), &bytesRead);
 					if (worked && bytesRead > 0 && bytesRead <= sizeof(uint64_t) && (uint64_t)actualPointer != pageCheckCursor) {
-						//printf("found one at 0x%016llx?  at 0x%016llx  %d   0x%016llx\n", actualPointer, pageCheckCursor, bytesRead, goDeeper);
-						//platform_getch();
 						if (!iThinkIFoundOne(pageset, actualPointer)) { return false; }
 					} else {
 						memoryLocation &= 0xffffffff; // mask 64 bit pointer to a 32 bit pointer
@@ -303,6 +318,7 @@ struct CustomMemPageListing {
 		this->copy(copy);
 	}
 };
+// binary-search to find the limits of the mempage that contains the memory location startingPoint
 MemPage::MemPage(HANDLE clientHandle, LPCVOID startingPoint):min(NULL),max(NULL),searchHits(0) {
 	BYTE buffer[1 << 10];
 	SIZE_T bytesRead;
@@ -349,7 +365,7 @@ ostream & operator<<(ostream& o, ArrayList<MemPage*> & listing) {
 istream & operator>>(istream& in, CustomMemPageListing & listing) {
 	uint64_t count;
 	in >> count;
-	cout << "Loading " << count << endl;
+	cout << "Found entries for " << count << " pages" << endl;
 	uint64_t addr = 0;
 	char buffer[1024];
 	String text;
@@ -362,8 +378,9 @@ istream & operator>>(istream& in, CustomMemPageListing & listing) {
 			MemPage * m = listing.get(listing.count() - 1);
 			m->name = String(buffer);
 		}
+		cout << "validating " << i << ", (" << listing.count() << " good so far)\r";
 	}
 	in >> std::dec;
-	cout << "attempted " << i << ", " << listing.count() << " successful!" << endl;
+	cout << "attempted " << i << ", " << listing.count() << " successful!                                " << endl;
 	return in;
 }
